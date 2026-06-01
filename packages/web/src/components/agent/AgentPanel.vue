@@ -216,9 +216,13 @@ async function send() {
 }
 
 function startInputResize(e: MouseEvent) {
+  e.preventDefault();
   isResizingInput = true;
   const startY = e.clientY;
   const startHeight = inputHeight.value;
+
+  document.body.style.cursor = 'row-resize';
+  document.body.style.userSelect = 'none';
 
   const onMove = (ev: MouseEvent) => {
     if (!isResizingInput) return;
@@ -227,12 +231,16 @@ function startInputResize(e: MouseEvent) {
 
   const onUp = () => {
     isResizingInput = false;
-    document.removeEventListener('mousemove', onMove);
-    document.removeEventListener('mouseup', onUp);
+    document.body.style.cursor = '';
+    document.body.style.userSelect = '';
+    window.removeEventListener('mousemove', onMove, true);
+    window.removeEventListener('mouseup', onUp, true);
+    window.removeEventListener('blur', onUp);
   };
 
-  document.addEventListener('mousemove', onMove);
-  document.addEventListener('mouseup', onUp);
+  window.addEventListener('mousemove', onMove, true);
+  window.addEventListener('mouseup', onUp, true);
+  window.addEventListener('blur', onUp);
 }
 
 onMounted(() => {
