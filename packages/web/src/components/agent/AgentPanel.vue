@@ -1,64 +1,21 @@
 <template>
   <div class="agent-panel">
-    <!-- 会话标签栏：仅在有工作区或有提供商时显示 -->
-    <div v-if="editorStore.activeWorkspaceId || providerSettings.providers.value.length > 0">
-      <n-tabs
-        v-if="useNewSessionTabs"
-        v-model:value="activeSessionValue"
-        type="card"
-        closable
-        addable
-        tab-style="min-width: 60px; max-width: 150px; user-select: none;"
-        class="session-tabs"
-        @close="handleSessionTabClose"
-        @add="createNewSession"
-      >
-        <n-tab-pane
-          v-for="s in sessionStore.sessions"
-          :key="s.id"
-          :name="s.id"
-          display-directive="show"
-        >
-          <template #tab>
-            <span class="session-tab-name-text" :title="s.name">{{ s.name }}</span>
-          </template>
-        </n-tab-pane>
-      </n-tabs>
-      <div v-else class="session-tabs-bar">
-        <button class="session-new-btn" @click="createNewSession" :title="$t('agent.newSession')">+</button>
-        <div class="session-tabs-scroll" ref="tabsScrollRef" @wheel="onTabsWheel" @scroll="updateScrollState">
-          <div
-            v-for="s in sessionStore.sessions"
-            :key="s.id"
-            class="session-tab"
-            :class="{ active: s.id === sessionStore.activeSessionId }"
-            @click="sessionStore.setActiveSession(s.id)"
-          >
-            <span class="session-tab-name" :title="s.name">{{ s.name }}</span>
-            <span class="session-tab-close" @click.stop="handleCloseSession(s.id)">×</span>
-          </div>
-        </div>
-        <template v-if="hasOverflow">
-          <button
-            class="session-scroll-btn"
-            :class="{ disabled: !canScrollLeft }"
-            @click="scrollTabs(-1)"
-          >◀</button>
-          <button
-            class="session-scroll-btn"
-            :class="{ disabled: !canScrollRight }"
-            @click="scrollTabs(1)"
-          >▶</button>
-        </template>
-      </div>
-    </div>
+    <!-- 会话标签栏 -->
+    <SessionTabs
+      v-if="hasSessionTabs"
+      :sessions="sessionStore.sessions"
+      :activeId="sessionStore.activeSessionId"
+      @select="sessionStore.setActiveSession($event)"
+      @close="handleCloseSession($event)"
+      @add="createNewSession"
+    />
 
-    <!-- 思考进度条 —— 处理时在面板最上方滚动 -->
+    <!-- 思考进度条 -->
     <div v-if="activeAgent?.isProcessing.value" class="thinking-progress">
       <div class="thinking-progress-bar"></div>
     </div>
 
-    <!-- 无提供商时的引导页面 -->
+    <!-- 引导页：无提供商 -->
     <div v-if="providerSettings.providers.value.length === 0" class="agent-guide">
       <div class="guide-icon"><n-icon size="36" :component="SettingsOutline" /></div>
       <div class="guide-title">{{ $t('agent.guideTitle') }}</div>
@@ -66,175 +23,38 @@
         {{ $t('agent.guideDesc1') }}<br />
         {{ $t('agent.guideDesc2') }}
       </div>
-      <button class="guide-cta" @click="showSettings = true">{{ $t('agent.addProvider') }}</button>
+      <n-button type="primary" @click="showSettings = true">{{ $t('agent.addProvider') }}</n-button>
     </div>
 
-    <!-- 无工作区时的提示（仅 server 模式且确实无工作区时） -->
+    <!-- 引导页：无工作区 -->
     <div v-else-if="!editorStore.activeWorkspaceId && editorStore.workspaceRoots.length === 0" class="agent-guide">
       <div class="guide-icon"><n-icon size="36" :component="FolderOpenOutline" /></div>
       <div class="guide-title">{{ $t('agent.noWorkspaceTitle') }}</div>
       <div class="guide-desc">{{ $t('agent.noWorkspaceDesc') }}</div>
     </div>
 
-    <!-- 无活跃会话时的提示 -->
+    <!-- 引导页：无活跃会话 -->
     <div v-else-if="!activeAgent" class="agent-guide">
       <div class="guide-icon"><n-icon size="36" :component="AddOutline" /></div>
       <div class="guide-title">{{ $t('agent.noSessionPrompt') }}</div>
-      <button class="guide-cta" @click="createNewSession">{{ $t('agent.newSession') }}</button>
+      <n-button type="primary" @click="createNewSession">{{ $t('agent.newSession') }}</n-button>
     </div>
 
-    <!-- 有提供商且有活跃会话时显示正常的聊天界面 -->
+    <!-- 正常聊天界面 -->
     <template v-else>
-      <!-- 消息列表 —— 时间轴布局 -->
-      <div class="agent-messages" ref="messagesContainer">
-        <div v-if="activeAgent.messages.value.length === 0" class="agent-empty">
-          {{ $t('agent.emptyChat') }}
-        </div>
+      <AgentChat
+        ref="agentChatRef"
+        :messages="activeAgent.messages.value"
+        @undo-edits="emit('undo-edits')"
+      />
 
-        <template v-for="msg in activeAgent.messages.value" :key="msg.id">
-          <!-- 用户消息 —— 右对齐，不在时间轴上 -->
-          <div v-if="msg.role === 'user'" class="user-msg-row">
-            <div class="user-msg-bubble">
-              <div class="user-msg-content" v-html="renderMarkdown(msg.content)"></div>
-            </div>
-          </div>
+      <ChatInput
+        :isProcessing="activeAgent.isProcessing.value"
+        :placeholder="$t('agent.askAgent')"
+        @send="send"
+        @stop="stopStream"
+      />
 
-          <!-- 助手消息：按 blocks 顺序渲染，在时间轴上 -->
-          <div v-if="msg.role === 'assistant'" class="timeline">
-            <!-- 有 blocks 时使用 blocks 渲染 -->
-            <template v-if="msg.blocks && msg.blocks.length > 0">
-              <div
-                v-for="block in msg.blocks"
-                :key="block.id"
-                v-memo="[Math.floor(block.content.length / 200), block.completed]"
-                class="tl-node"
-                :class="{
-                  'tl-thinking': block.type === 'thinking',
-                  'tl-response': block.type === 'response',
-                  'tl-tool': block.type === 'tool_call',
-                  'tl-tool-running': block.type === 'tool_call' && !block.completed,
-                  'tl-tool-done': block.type === 'tool_call' && block.completed,
-                }"
-              >
-                <!-- 思考块 -->
-                <template v-if="block.type === 'thinking'">
-                  <div class="tl-dot tl-dot-thinking"></div>
-                  <div class="tl-body">
-                    <div class="tl-thinking-header" @click="toggleBlock(block.id)">
-                      <span class="tl-thinking-label">💭 {{ $t('agent.reasoning') }}</span>
-                      <span class="tl-thinking-toggle">{{ expandedState[block.id] ? '▾' : '▸' }}</span>
-                    </div>
-                    <div class="tl-thinking-body" :class="{ expanded: expandedState[block.id] }">
-                      <div class="tl-thinking-content" v-html="renderMarkdown(block.content)"></div>
-                    </div>
-                  </div>
-                </template>
-
-                <!-- 工具调用块 —— 默认折叠 -->
-                <template v-else-if="block.type === 'tool_call'">
-                  <div class="tl-dot tl-dot-tool"></div>
-                  <div class="tl-body">
-                    <div class="tl-tool-header" @click="toggleBlock(block.id)">
-                      <span class="tl-tool-icon">{{ block.completed ? '✅' : '⏳' }}</span>
-                      <span class="tl-tool-type">{{ block.toolType }}</span>
-                      <span v-if="block.toolLabel" class="tl-tool-label">{{ block.toolLabel }}</span>
-                      <span class="tl-tool-toggle">{{ expandedState[block.id] ? '▾' : '▸' }}</span>
-                    </div>
-                    <div v-if="block.content" class="tl-tool-result" :class="{ expanded: expandedState[block.id] }">
-                      <pre>{{ block.content }}</pre>
-                    </div>
-                  </div>
-                </template>
-
-                <!-- 回复块 -->
-                <template v-else-if="block.type === 'response'">
-                  <div class="tl-dot tl-dot-response"></div>
-                  <div class="tl-body">
-                    <div class="tl-content" v-html="renderMarkdown(block.content)"></div>
-                  </div>
-                </template>
-              </div>
-            </template>
-
-            <!-- 无 blocks 时回退到旧版渲染 -->
-            <template v-else>
-              <div v-if="msg.thinking" class="tl-node tl-thinking">
-                <div class="tl-dot tl-dot-thinking"></div>
-                <div class="tl-body">
-                  <div class="tl-thinking-header" @click="toggleBlock(msg.id)">
-                    <span class="tl-thinking-label">💭 {{ $t('agent.reasoning') }}</span>
-                    <span class="tl-thinking-toggle">{{ expandedState[msg.id] ? '▾' : '▸' }}</span>
-                  </div>
-                  <div class="tl-thinking-body" :class="{ expanded: expandedState[msg.id] }">
-                    <div class="tl-thinking-content" v-html="renderMarkdown(msg.thinking)"></div>
-                  </div>
-                </div>
-              </div>
-              <div v-if="msg.content" class="tl-node tl-response">
-                <div class="tl-dot tl-dot-response"></div>
-                <div class="tl-body">
-                  <div class="tl-content" v-html="renderMarkdown(msg.content)"></div>
-                </div>
-              </div>
-            </template>
-
-            <!-- 编辑摘要节点 -->
-            <div v-if="msg.editOperations && msg.editOperations.length > 0" class="tl-node tl-edit">
-              <div class="tl-dot tl-dot-edit"></div>
-              <div class="tl-body">
-                <div class="tl-edit-summary">
-                  <span>{{ msg.editOperations.length }}{{ $t('agent.filesModified') }}</span>
-                  <span v-for="e in msg.editOperations" :key="e.path" class="tl-edit-file">{{ e.path }}</span>
-                  <button class="tl-undo-btn" @click="emit('undo-edits')">{{ $t('agent.undo') }}</button>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <!-- 系统消息（错误等） -->
-          <div v-if="msg.role === 'system'" class="timeline">
-            <div class="tl-node tl-system">
-              <div class="tl-dot tl-dot-system"></div>
-              <div class="tl-body">
-                <div class="tl-content" v-html="renderMarkdown(msg.content)"></div>
-              </div>
-            </div>
-          </div>
-        </template>
-      </div>
-
-      <!-- 输入区域拖拽手柄 -->
-      <div class="input-resize-handle" @mousedown="startInputResize"></div>
-
-      <!-- 输入区域 -->
-      <div class="agent-input-area" :style="{ height: inputHeight + 'px' }">
-        <textarea
-          v-model="input"
-          class="agent-input"
-          :placeholder="$t('agent.askAgent')"
-          rows="2"
-          @keydown.enter.exact.prevent="send"
-          @keydown.ctrl.enter.prevent="send"
-          @keydown.meta.enter.prevent="send"
-        ></textarea>
-        <button
-          v-if="activeAgent?.isProcessing.value"
-          class="agent-stop-btn"
-          @click="stopStream"
-        >
-          {{ $t('agent.stop') }}
-        </button>
-        <button
-          v-else
-          class="agent-send-btn"
-          @click="send"
-          :disabled="!input.trim()"
-        >
-          {{ $t('agent.send') }}
-        </button>
-      </div>
-
-      <!-- 提供商选择 + 模式切换 -->
       <div class="agent-footer">
         <div class="footer-left">
           <ProviderSelect
@@ -242,7 +62,9 @@
             :activeId="providerSettings.activeId.value"
             @select="providerSettings.setActive($event)"
           />
-          <button class="settings-btn" :title="$t('agent.providerSettings')" @click="showSettings = true">&#9881;</button>
+          <n-button size="tiny" quaternary :title="$t('agent.providerSettings')" @click="showSettings = true">
+            <template #icon><n-icon :component="SettingsOutline" /></template>
+          </n-button>
         </div>
         <ModeSelector v-model="currentMode" />
       </div>
@@ -254,40 +76,35 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, nextTick, onMounted, onUnmounted } from 'vue';
-import { NTabs, NTabPane, NIcon } from 'naive-ui';
+import { ref, computed, nextTick, onMounted } from 'vue';
+import { NIcon, NButton } from 'naive-ui';
+import { SettingsOutline, FolderOpenOutline, AddOutline } from '@vicons/ionicons5';
 import { useSessionStore } from '../../stores/sessions';
 import { useLLMSettings } from '../../composables/useLLMSettings';
 import { useEditorStore } from '../../stores/editor';
-import { renderMarkdown } from '../../services/markdown';
-import type { ChatMessage } from '../../composables/useAgent';
 import type { ParsedEdit } from '../../services/editParser';
+import { webAgentLog } from '../../services/logger';
+import SessionTabs from './SessionTabs.vue';
+import AgentChat from './AgentChat.vue';
+import ChatInput from './ChatInput.vue';
 import SettingsDialog from './SettingsDialog.vue';
 import ModeSelector from './ModeSelector.vue';
 import ProviderSelect from './ProviderSelect.vue';
-import { webAgentLog } from '../../services/logger';
-import { SettingsOutline, FolderOpenOutline, AddOutline } from '@vicons/ionicons5';
-
-const props = defineProps<{}>();
 
 const emit = defineEmits<{
-  'apply-edits': [edits: ParsedEdit[]]
-  'undo-edits': []
+  'apply-edits': [edits: ParsedEdit[]];
+  'undo-edits': [];
 }>();
 
 const sessionStore = useSessionStore();
 const providerSettings = useLLMSettings();
 const editorStore = useEditorStore();
-const input = ref('');
-const messagesContainer = ref<HTMLElement>();
 const showSettings = ref(false);
-const inputHeight = ref(90);
-let isResizingInput = false;
 
-// 从 store 获取当前活跃的 agent 实例
+const agentChatRef = ref<InstanceType<typeof AgentChat>>();
 const activeAgent = computed(() => sessionStore.activeAgent);
+const hasSessionTabs = computed(() => editorStore.activeWorkspaceId || providerSettings.providers.value.length > 0);
 
-// ModeSelector 的 writable computed —— 解决 activeAgent 可能为 null 的问题
 const currentMode = computed({
   get: () => activeAgent.value?.config.value.mode ?? 'plan',
   set: (val) => {
@@ -297,113 +114,17 @@ const currentMode = computed({
   },
 });
 
-// ===== 会话标签栏切换 =====
-const useNewSessionTabs = ref(true);
-const activeSessionValue = computed<string | undefined>({
-  get: () => sessionStore.activeSessionId ?? undefined,
-  set: (val) => { if (val) sessionStore.setActiveSession(val); },
-});
-function handleSessionTabClose(name: string) {
-  sessionStore.closeSession(name);
-}
-
-// --- 会话标签栏滚动控制 ---
-const tabsScrollRef = ref<HTMLElement>();
-const hasOverflow = ref(false);
-const canScrollLeft = ref(false);
-const canScrollRight = ref(false);
-
-function updateScrollState() {
-  const el = tabsScrollRef.value;
-  if (!el) return;
-  hasOverflow.value = el.scrollWidth > el.clientWidth;
-  canScrollLeft.value = el.scrollLeft > 0;
-  canScrollRight.value = el.scrollLeft + el.clientWidth < el.scrollWidth - 1;
-}
-
-function scrollTabs(direction: 1 | -1) {
-  const el = tabsScrollRef.value;
-  if (!el) return;
-  el.scrollBy({ left: direction * 200, behavior: 'smooth' });
-}
-
-function onTabsWheel(e: WheelEvent) {
-  const el = tabsScrollRef.value;
-  if (!el) return;
-  e.preventDefault();
-  el.scrollBy({ left: e.deltaY, behavior: 'auto' });
-}
-
 function createNewSession() {
   sessionStore.createSession();
-  nextTick(() => updateScrollState());
 }
 
 function handleCloseSession(id: string) {
   sessionStore.closeSession(id);
-  nextTick(() => updateScrollState());
 }
 
-// --- 块展开/折叠状态 ---
-const expandedState = reactive<Record<string, boolean>>({});
-
-function toggleBlock(blockId: string) {
-  expandedState[blockId] = !expandedState[blockId];
-}
-
-// ===== 自动滚动控制 =====
-const userScrolledUp = ref(false);
-let scrollRafId = 0;
-let observer: MutationObserver | null = null;
-
-function isNearBottom(): boolean {
-  const el = messagesContainer.value;
-  if (!el) return false;
-  return el.scrollHeight - el.scrollTop - el.clientHeight < 50;
-}
-
-function scrollToBottom() {
-  const el = messagesContainer.value;
-  if (el) el.scrollTop = el.scrollHeight;
-}
-
-function scheduleScroll(force = false) {
-  cancelAnimationFrame(scrollRafId);
-  scrollRafId = requestAnimationFrame(() => {
-    if (force || !userScrolledUp.value) {
-      scrollToBottom();
-    }
-  });
-}
-
-function onMessagesScroll() {
-  userScrolledUp.value = !isNearBottom();
-}
-
-let ro: ResizeObserver | null = null;
-
-function setupObserver() {
-  const el = messagesContainer.value;
-  if (!el) return;
-  observer = new MutationObserver(() => {
-    scheduleScroll(false);
-  });
-  observer.observe(el, {
-    childList: true,
-    subtree: true,
-    characterData: true,
-  });
-}
-
-async function send() {
+async function send(text: string) {
   const agent = activeAgent.value;
   if (!agent) return;
-
-  const text = input.value.trim();
-  if (!text) return;
-  input.value = '';
-
-  userScrolledUp.value = false;
 
   // 自动从首条消息命名会话
   if (sessionStore.activeSession && !sessionStore.activeSession.nameAutoGenerated) {
@@ -416,12 +137,11 @@ async function send() {
   const streamPromise = agent.streamMessage(
     text,
     providerSettings.activeProvider.value,
-    () => scheduleScroll(false),
+    () => agentChatRef.value?.forceScrollBottom(),
     activeFilePath
   );
 
-  await nextTick();
-  scrollToBottom();
+  agentChatRef.value?.forceScrollBottom();
 
   try {
     await streamPromise;
@@ -436,8 +156,6 @@ async function send() {
     emit('apply-edits', [...agent.lastEdits.value]);
     agent.lastEdits.value = [];
   }
-
-  scheduleScroll(true);
 }
 
 function stopStream() {
@@ -447,53 +165,8 @@ function stopStream() {
   }
 }
 
-function startInputResize(e: MouseEvent) {
-  e.preventDefault();
-  isResizingInput = true;
-  const startY = e.clientY;
-  const startHeight = inputHeight.value;
-
-  document.body.style.cursor = 'row-resize';
-  document.body.style.userSelect = 'none';
-
-  const onMove = (ev: MouseEvent) => {
-    if (!isResizingInput) return;
-    inputHeight.value = Math.max(60, Math.min(320, startHeight - (ev.clientY - startY)));
-  };
-
-  const onUp = () => {
-    isResizingInput = false;
-    document.body.style.cursor = '';
-    document.body.style.userSelect = '';
-    window.removeEventListener('mousemove', onMove, true);
-    window.removeEventListener('mouseup', onUp, true);
-    window.removeEventListener('blur', onUp);
-  };
-
-  window.addEventListener('mousemove', onMove, true);
-  window.addEventListener('mouseup', onUp, true);
-  window.addEventListener('blur', onUp);
-}
-
 onMounted(() => {
   providerSettings.reload();
-  messagesContainer.value?.addEventListener('scroll', onMessagesScroll);
-  setupObserver();
-
-  // 标签栏溢出检测
-  const scrollEl = tabsScrollRef.value;
-  if (scrollEl) {
-    ro = new ResizeObserver(() => updateScrollState());
-    ro.observe(scrollEl);
-    updateScrollState();
-  }
-});
-
-onUnmounted(() => {
-  cancelAnimationFrame(scrollRafId);
-  observer?.disconnect();
-  ro?.disconnect();
-  messagesContainer.value?.removeEventListener('scroll', onMessagesScroll);
 });
 </script>
 
@@ -507,139 +180,7 @@ onUnmounted(() => {
   overflow: hidden;
 }
 
-/* ===== 会话标签栏 ===== */
-.session-tabs {
-  flex-shrink: 0;
-  user-select: none;
-}
-.session-tabs :deep(.n-tabs-pane-wrapper) {
-  display: none;
-}
-.session-tabs :deep(.n-tabs-nav) {
-  background: var(--bg-tertiary);
-  border-bottom: 1px solid var(--border-color);
-}
-.session-tabs :deep(.n-tabs-tab) {
-  background: transparent;
-  border-right: 1px solid var(--border-color);
-}
-.session-tabs :deep(.n-tabs-tab__label) {
-  overflow: hidden;
-  min-width: 0;
-}
-.session-tabs :deep(.n-tabs-tab--active) {
-  background: var(--bg-secondary);
-}
-.session-tabs :deep(.n-tabs-tab:hover) {
-  background: var(--bg-hover);
-}
-.session-tab-name-text {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  min-width: 0;
-}
-.session-tabs-bar {
-  display: flex;
-  align-items: center;
-  background: var(--bg-tertiary);
-  border-bottom: 1px solid var(--border-color);
-  flex-shrink: 0;
-  height: 32px;
-}
-
-.session-new-btn {
-  flex-shrink: 0;
-  background: none;
-  border: none;
-  color: var(--text-secondary);
-  font-size: 16px;
-  width: 28px;
-  height: 100%;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-right: 1px solid var(--border-color);
-}
-.session-new-btn:hover {
-  color: var(--text-primary);
-  background: var(--bg-hover);
-}
-
-.session-tabs-scroll {
-  display: flex;
-  overflow-x: auto;
-  flex: 1;
-  min-width: 0;
-}
-.session-tabs-scroll::-webkit-scrollbar {
-  display: none;
-}
-
-.session-tab {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  padding: 4px 10px;
-  font-size: 12px;
-  color: var(--text-secondary);
-  cursor: pointer;
-  border-right: 1px solid var(--border-color);
-  white-space: nowrap;
-  user-select: none;
-  max-width: 150px;
-}
-.session-tab.active {
-  background: var(--bg-secondary);
-  color: var(--text-primary);
-}
-.session-tab:hover {
-  background: var(--bg-hover);
-}
-
-.session-tab-name {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  flex: 1;
-  min-width: 0;
-}
-
-.session-tab-close {
-  font-size: 12px;
-  opacity: 0.6;
-  flex-shrink: 0;
-}
-.session-tab-close:hover {
-  opacity: 1;
-  color: #f44747;
-}
-
-.session-scroll-btn {
-  flex-shrink: 0;
-  background: none;
-  border: none;
-  border-left: 1px solid var(--border-color);
-  color: var(--text-secondary);
-  font-size: 10px;
-  width: 22px;
-  height: 100%;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-.session-scroll-btn:hover:not(.disabled) {
-  color: var(--text-primary);
-  background: var(--bg-hover);
-}
-.session-scroll-btn.disabled {
-  opacity: 0.3;
-  cursor: default;
-}
-
-/* ===== 思考进度条 ===== */
+/* 思考进度条 */
 .thinking-progress {
   position: absolute;
   top: 32px;
@@ -650,7 +191,6 @@ onUnmounted(() => {
   overflow: hidden;
   background: transparent;
 }
-
 .thinking-progress-bar {
   width: 40%;
   height: 100%;
@@ -658,335 +198,12 @@ onUnmounted(() => {
   animation: progress-scroll 1.2s ease-in-out infinite;
   border-radius: 2px;
 }
-
 @keyframes progress-scroll {
-  0% {
-    transform: translateX(-100%);
-  }
-  100% {
-    transform: translateX(350%);
-  }
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(350%); }
 }
 
-/* ===== 时间轴布局（每个助手消息一条时间轴） ===== */
-.timeline {
-  position: relative;
-  padding-left: 24px;
-  margin-bottom: 16px;
-}
-
-/* 贯穿该消息所有块的竖线 */
-.timeline::before {
-  content: '';
-  position: absolute;
-  left: 7px;
-  top: 6px;
-  bottom: 6px;
-  width: 2px;
-  background: var(--border-color);
-  border-radius: 1px;
-}
-
-/* ===== 时间轴节点 ===== */
-.tl-node {
-  position: relative;
-  margin-bottom: 12px;
-}
-
-.tl-dot {
-  position: absolute;
-  left: -22px;
-  top: 6px;
-  width: 12px;
-  height: 12px;
-  border-radius: 50%;
-  z-index: 1;
-  border: 2px solid var(--bg-secondary);
-}
-
-/* 用户 — 蓝色 */
-.tl-dot-user {
-  background: #569cd6;
-  box-shadow: 0 0 0 2px rgba(86, 156, 214, 0.3);
-}
-
-/* 思考 — 琥珀色 */
-.tl-dot-thinking {
-  background: #d4a017;
-  box-shadow: 0 0 0 2px rgba(212, 160, 23, 0.3);
-}
-
-/* 工具 — 绿色（完成）/ 动画（运行中） */
-.tl-dot-tool {
-  background: #4ec9b0;
-  box-shadow: 0 0 0 2px rgba(78, 201, 176, 0.3);
-}
-.tl-tool-running .tl-dot-tool {
-  animation: tl-pulse 1s ease-in-out infinite;
-}
-
-/* 回复 — 白色 */
-.tl-dot-response {
-  background: #a0a0a0;
-  box-shadow: 0 0 0 2px rgba(160, 160, 160, 0.3);
-}
-
-/* 编辑 — 亮绿色 */
-.tl-dot-edit {
-  background: #6a9955;
-  box-shadow: 0 0 0 2px rgba(106, 153, 85, 0.3);
-}
-
-/* 系统 — 红色 */
-.tl-dot-system {
-  background: #f44747;
-  box-shadow: 0 0 0 2px rgba(244, 71, 71, 0.3);
-}
-
-@keyframes tl-pulse {
-  0%, 100% { box-shadow: 0 0 0 2px rgba(78, 201, 176, 0.3); }
-  50% { box-shadow: 0 0 0 6px rgba(78, 201, 176, 0.1); }
-}
-
-/* ===== 节点内容体 ===== */
-.tl-body {
-  padding: 4px 0;
-}
-
-.tl-content {
-  font-size: 13px;
-  line-height: 1.6;
-  color: var(--text-primary);
-}
-.tl-content :deep(p) {
-  margin: 4px 0;
-}
-.tl-content :deep(h1) {
-  font-size: 16px;
-  font-weight: 600;
-  margin: 8px 0 4px;
-  border-bottom: 1px solid var(--border-color);
-  padding-bottom: 4px;
-}
-.tl-content :deep(h2) {
-  font-size: 14px;
-  font-weight: 600;
-  margin: 8px 0 4px;
-}
-.tl-content :deep(h3) {
-  font-size: 13px;
-  font-weight: 600;
-  margin: 6px 0 2px;
-}
-.tl-content :deep(pre) {
-  background: #0d1117;
-  border: 1px solid var(--border-color);
-  border-radius: 4px;
-  padding: 8px 10px;
-  margin: 6px 0;
-  overflow-x: auto;
-  font-size: 12px;
-  line-height: 1.4;
-}
-.tl-content :deep(code) {
-  font-family: 'Consolas', 'Courier New', monospace;
-  font-size: 12px;
-}
-.tl-content :deep(:not(pre) > code) {
-  background: var(--bg-tertiary);
-  padding: 1px 4px;
-  border-radius: 3px;
-  color: #e06c75;
-}
-.tl-content :deep(strong) {
-  font-weight: 600;
-  color: #fff;
-}
-.tl-content :deep(em) {
-  font-style: italic;
-}
-.tl-content :deep(ul),
-.tl-content :deep(ol) {
-  margin: 4px 0;
-  padding-left: 20px;
-}
-.tl-content :deep(li) {
-  margin: 2px 0;
-}
-.tl-content :deep(a) {
-  color: var(--accent-color);
-  text-decoration: none;
-}
-.tl-content :deep(a:hover) {
-  text-decoration: underline;
-}
-.tl-content :deep(blockquote) {
-  border-left: 3px solid var(--accent-color);
-  margin: 6px 0;
-  padding: 4px 10px;
-  color: var(--text-secondary);
-  background: rgba(255,255,255,0.03);
-}
-.tl-content :deep(hr) {
-  border: none;
-  border-top: 1px solid var(--border-color);
-  margin: 8px 0;
-}
-
-/* ===== 思考节点 ===== */
-.tl-thinking-header {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 3px 0;
-  font-size: 12px;
-  cursor: pointer;
-  user-select: none;
-  color: #b8952e;
-}
-.tl-thinking-header:hover {
-  color: #d4a017;
-}
-
-.tl-thinking-label {
-  font-weight: 500;
-}
-
-.tl-thinking-toggle {
-  font-size: 10px;
-  opacity: 0.7;
-}
-
-.tl-thinking-body {
-  margin-top: 4px;
-  padding: 0;
-  border-left: 2px solid rgba(212, 160, 23, 0.3);
-  background: rgba(255, 200, 50, 0.04);
-  border-radius: 0 4px 4px 0;
-  /* 默认折叠：显示约 2 行预览，底部对齐以展示最新内容 */
-  max-height: 2.8em;
-  overflow: hidden;
-  display: flex;
-  flex-direction: column;
-  justify-content: flex-end;
-  transition: max-height 0.2s ease;
-}
-.tl-thinking-body.expanded {
-  max-height: 3000px;
-  display: block;
-}
-
-.tl-thinking-content {
-  font-size: 12px;
-  line-height: 1.4;
-  color: #b8952e;
-  white-space: pre-wrap;
-  word-break: break-word;
-  padding: 4px 10px;
-}
-
-/* ===== 工具调用节点 ===== */
-.tl-tool-header {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 3px 0;
-  font-size: 12px;
-  color: #4ec9b0;
-  cursor: pointer;
-  user-select: none;
-}
-.tl-tool-header:hover {
-  color: #6fdcc0;
-}
-
-.tl-tool-icon {
-  font-size: 12px;
-}
-
-.tl-tool-type {
-  font-weight: 600;
-  font-family: 'Consolas', 'Courier New', monospace;
-}
-
-.tl-tool-label {
-  color: var(--text-secondary);
-  font-size: 11px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.tl-tool-toggle {
-  margin-left: auto;
-  font-size: 10px;
-  opacity: 0.7;
-}
-
-.tl-tool-running .tl-tool-type {
-  opacity: 0.8;
-}
-
-.tl-tool-result {
-  margin-top: 4px;
-  border-left: 2px solid rgba(78, 201, 176, 0.3);
-  background: rgba(78, 201, 176, 0.04);
-  border-radius: 0 4px 4px 0;
-  /* 默认折叠 */
-  max-height: 0;
-  overflow: hidden;
-  transition: max-height 0.2s ease;
-}
-.tl-tool-result.expanded {
-  max-height: 600px;
-  overflow-y: auto;
-}
-.tl-tool-result pre {
-  margin: 0;
-  padding: 6px 10px;
-  font-size: 11px;
-  line-height: 1.4;
-  color: var(--text-secondary);
-  white-space: pre-wrap;
-  word-break: break-word;
-  font-family: 'Consolas', 'Courier New', monospace;
-}
-
-/* ===== 编辑摘要节点 ===== */
-.tl-edit-summary {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  align-items: center;
-  padding: 6px 0;
-  font-size: 11px;
-  color: #6a9955;
-}
-
-.tl-edit-file {
-  background: rgba(106, 153, 85, 0.15);
-  padding: 1px 6px;
-  border-radius: 3px;
-  font-family: 'Consolas', 'Courier New', monospace;
-  font-size: 10px;
-}
-
-.tl-undo-btn {
-  margin-left: auto;
-  background: rgba(255, 200, 50, 0.15);
-  border: 1px solid rgba(255, 200, 50, 0.3);
-  color: #d4a017;
-  padding: 2px 8px;
-  font-size: 10px;
-  cursor: pointer;
-  border-radius: 3px;
-  white-space: nowrap;
-}
-.tl-undo-btn:hover {
-  background: rgba(255, 200, 50, 0.25);
-}
-
-/* ===== Footer ===== */
+/* Footer */
 .agent-footer {
   display: flex;
   align-items: center;
@@ -1002,146 +219,8 @@ onUnmounted(() => {
   gap: 4px;
   min-width: 0;
 }
-.settings-btn {
-  background: none;
-  border: 1px solid var(--border-color);
-  color: var(--text-secondary);
-  font-size: 14px;
-  cursor: pointer;
-  padding: 2px 6px;
-  border-radius: 3px;
-  line-height: 1;
-  flex-shrink: 0;
-}
-.settings-btn:hover {
-  color: var(--text-primary);
-  border-color: var(--accent-color);
-}
-.agent-messages {
-  flex: 1;
-  overflow-y: auto;
-  padding: 12px 16px;
-}
-.agent-empty {
-  color: var(--text-secondary);
-  font-size: 13px;
-  text-align: center;
-  padding: 40px 0;
-  user-select: none;
-}
 
-/* ===== 用户消息 —— 右对齐，不在时间轴上 ===== */
-.user-msg-row {
-  display: flex;
-  justify-content: flex-end;
-  margin-bottom: 16px;
-}
-
-.user-msg-bubble {
-  max-width: 80%;
-  background: var(--bg-tertiary);
-  border: 1px solid var(--border-color);
-  border-radius: 12px 12px 4px 12px;
-  padding: 10px 14px;
-}
-
-.user-msg-content {
-  font-size: 13px;
-  line-height: 1.5;
-  color: var(--text-primary);
-}
-.user-msg-content :deep(p) {
-  margin: 4px 0;
-}
-.user-msg-content :deep(pre) {
-  background: #0d1117;
-  border: 1px solid var(--border-color);
-  border-radius: 4px;
-  padding: 8px 10px;
-  margin: 6px 0;
-  overflow-x: auto;
-  font-size: 12px;
-}
-.user-msg-content :deep(code) {
-  font-family: 'Consolas', 'Courier New', monospace;
-  font-size: 12px;
-}
-.user-msg-content :deep(:not(pre) > code) {
-  background: rgba(255,255,255,0.08);
-  padding: 1px 4px;
-  border-radius: 3px;
-  color: var(--agent-code-accent);
-}
-.agent-input-area {
-  display: flex;
-  gap: 6px;
-  padding: 8px;
-  border-top: 1px solid var(--border-color);
-  flex-shrink: 0;
-  overflow: hidden;
-}
-.input-resize-handle {
-  height: 3px;
-  cursor: row-resize;
-  background: var(--border-color);
-  flex-shrink: 0;
-  transition: background 0.15s;
-}
-.input-resize-handle:hover {
-  background: var(--accent-color);
-}
-.agent-input {
-  flex: 1;
-  background: var(--bg-tertiary);
-  border: 1px solid var(--border-color);
-  color: var(--text-primary);
-  padding: 6px 8px;
-  font-size: 13px;
-  resize: none;
-  border-radius: 4px;
-  font-family: inherit;
-}
-.agent-input:focus {
-  outline: none;
-  border-color: var(--accent-color);
-}
-.agent-send-btn {
-  background: var(--accent-color);
-  border: none;
-  color: #fff;
-  padding: 6px 14px;
-  font-size: 12px;
-  cursor: pointer;
-  border-radius: 4px;
-  align-self: flex-end;
-}
-.agent-send-btn:hover {
-  background: var(--accent-hover);
-}
-.agent-send-btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-.agent-stop-btn {
-  background: #f44747;
-  border: none;
-  color: #fff;
-  padding: 6px 14px;
-  font-size: 12px;
-  cursor: pointer;
-  border-radius: 4px;
-  align-self: flex-end;
-  animation: stop-pulse 1.5s ease-in-out infinite;
-}
-.agent-stop-btn:hover {
-  background: #d63030;
-}
-@keyframes stop-pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.7; }
-}
-
-/* ---- 无提供商引导页 ---- */
+/* 引导页 */
 .agent-guide {
   flex: 1;
   display: flex;
@@ -1168,19 +247,5 @@ onUnmounted(() => {
   color: var(--text-secondary);
   margin-bottom: 22px;
   line-height: 1.5;
-}
-.guide-cta {
-  background: var(--accent-color);
-  color: #fff;
-  border: none;
-  padding: 8px 24px;
-  font-size: 13px;
-  border-radius: 4px;
-  cursor: pointer;
-  font-family: inherit;
-  margin-bottom: 8px;
-}
-.guide-cta:hover {
-  background: var(--accent-hover);
 }
 </style>

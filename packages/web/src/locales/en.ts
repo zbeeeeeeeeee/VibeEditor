@@ -159,6 +159,7 @@ export default {
     response: 'Response',
     filesModified: ' files modified: ',
     undo: 'Undo',
+    undoConfirm: 'Revert all file changes from this message?',
     thinking: 'Thinking...',
     askAgent: 'Ask the agent...',
     send: 'Send',

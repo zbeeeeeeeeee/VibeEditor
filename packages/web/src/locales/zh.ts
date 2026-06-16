@@ -159,6 +159,7 @@ export default {
     response: '回复',
     filesModified: ' 个文件已修改：',
     undo: '撤销',
+    undoConfirm: '确定要撤销此消息的所有文件修改吗？',
     thinking: '思考中...',
     askAgent: '向 AI 助手提问...',
     send: '发送',

@@ -1,5 +1,7 @@
 import { i18n } from '../locales';
 import { webAgentLog } from './logger';
+import type { AgentConfig, StreamEvent } from './chat-protocol';
+import type { ParsedEdit } from './editParser';
 
 declare const __SERVER_PORT__: number;
 
@@ -7,33 +9,17 @@ const DEFAULT_BASE_URL: string = typeof __SERVER_PORT__ !== 'undefined'
   ? `http://localhost:${__SERVER_PORT__}`
   : '';
 
-
-/** Agent 运行配置 */
-export interface AgentConfig {
-  mode: 'build' | 'plan';
-  providerId?: string;
-  model?: string;
-  apiUrl?: string;
-  systemPrompt?: string;
-  temperature?: number;
-  maxTokens?: number;
-}
-
-/** 对话消息 */
+/** 对话消息（HTTP 响应格式） */
 export interface AgentMessage {
   id: string;
   role: 'user' | 'assistant' | 'system';
   content: string;
-  edits?: { path: string; content: string }[];
+  edits?: ParsedEdit[];
   timestamp: number;
 }
 
-/** SSE 流式事件类型 */
-export interface StreamEvent {
-  type: 'tool_start' | 'tool_end' | 'tool_result' | 'thinking_start' | 'thinking_end';
-  message?: string;
-  content?: string;
-}
+// 从 chat-protocol 重导出，方便外部从单一入口导入
+export type { AgentConfig, StreamEvent } from './chat-protocol';
 
 export function createAgentService(baseUrl = DEFAULT_BASE_URL) {
   return {

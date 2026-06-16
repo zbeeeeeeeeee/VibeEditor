@@ -3,51 +3,13 @@ import { createAgentService } from '../services/agentService';
 import type { AgentConfig, StreamEvent } from '../services/agentService';
 import type { ProviderConfig } from './useLLMSettings';
 import type { ParsedEdit } from '../services/editParser';
+import type { AgentContext, ChatMessage, MessageBlock } from '../services/chat-protocol';
 import { useEditorStore } from '../stores/editor';
 import { getEditorInstance } from '../services/editorInstance';
 import { webAgentLog } from '../services/logger';
 
-/** Agent 运行上下文 —— 当前 IDE 环境快照 */
-export interface AgentContext {
-  openFiles: { path: string; content: string }[];
-  fileTree: string[];
-  cursorPosition?: { file: string; line: number; column: number };
-  selection?: { file: string; text: string; startLine: number; endLine: number };
-  conversationHistory: { id: string; role: string; content: string; timestamp: number }[];
-}
-
-/** 消息块 —— 按时间顺序记录助手消息中的每个阶段 */
-export interface MessageBlock {
-  id: string;
-  type: 'thinking' | 'response' | 'tool_call';
-  content: string;
-  toolType?: string;
-  toolLabel?: string;
-  completed: boolean;
-}
-
-/** 聊天消息 */
-export interface ChatMessage {
-  id: string;
-  role: 'user' | 'assistant' | 'system';
-  content: string;
-  thinking?: string;
-  edits?: { path: string; content: string }[];
-  timestamp: number;
-  editOperations?: ParsedEdit[];
-  blocks?: MessageBlock[];
-  /** @deprecated 使用 blocks 替代 */
-  toolNodes?: ToolCallNode[];
-}
-
-/** 流式过程中的工具调用节点 */
-export interface ToolCallNode {
-  id: string;
-  toolType: string;
-  toolLabel: string;
-  result: string;
-  completed: boolean;
-}
+// 从 chat-protocol 重导出，方便其他模块从单一入口导入
+export type { AgentContext, ChatMessage, MessageBlock } from '../services/chat-protocol';
 
 function collectFileTreePaths(entries: any[], basePath: string): string[] {
   const paths: string[] = [];
@@ -198,13 +160,16 @@ export function useAgent(sessionId?: string) {
 
     function finishBlock() {
       if (currentBlock) {
+        // 先刷新内容缓冲，确保内容写入正确的 block
+        flushContentNow();
         currentBlock.completed = true;
         currentBlock = null;
       }
     }
 
-    function ensureBlock(type: MessageBlock['type'], toolType?: string, toolLabel?: string) {
+    function ensureBlock(type: 'thinking' | 'response' | 'tool_call', toolType?: string, toolLabel?: string) {
       if (currentBlock && currentBlock.type === type && !currentBlock.completed) return;
+      webAgentLog.info(`ensureBlock: switching to ${type}, prevBlock=${currentBlock?.type || 'null'}, bufferLen=${contentBuffer.length}`);
       finishBlock();
       currentBlock = {
         id: nextBlockId(),
@@ -213,11 +178,13 @@ export function useAgent(sessionId?: string) {
         toolType,
         toolLabel,
         completed: false,
-      };
+        timestamp: Date.now(),
+      } as MessageBlock;
       const msg = messages.value.find(m => m.id === assistantMsgId);
       if (msg) {
         if (!msg.blocks) msg.blocks = [];
         msg.blocks.push(currentBlock);
+        webAgentLog.info(`ensureBlock: pushed ${type} block, blocks.length=${msg.blocks.length}`);
       }
     }
 
@@ -227,17 +194,31 @@ export function useAgent(sessionId?: string) {
     const FLUSH_INTERVAL = 50;
 
     function flushContent() {
+      webAgentLog.info(`flushContent: bufferLen=${contentBuffer.length}, currentBlock=${currentBlock?.type || 'null'}`);
       if (contentBuffer.length === 0) return;
       const text = contentBuffer.join('');
       contentBuffer.length = 0;
       if (currentBlock) {
         currentBlock.content += text;
+        webAgentLog.info(`flushContent: wrote ${text.length} chars to ${currentBlock.type}, total=${(currentBlock as any).content?.length || 0}`);
       }
       if (onChunk) onChunk();
     }
 
+    /** 同步刷新缓冲（不清除 timer），用于 block 切换前保存内容 */
+    function flushContentNow() {
+      if (contentBuffer.length === 0) return;
+      const text = contentBuffer.join('');
+      contentBuffer.length = 0;
+      webAgentLog.info(`flushContentNow: wrote ${text.length} chars to ${(currentBlock as any)?.type || 'null'}, total=${(currentBlock as any)?.content?.length || 0}`);
+      if (currentBlock) {
+        currentBlock.content += text;
+      }
+    }
+
     function scheduleFlush() {
       if (flushTimer) return;
+      webAgentLog.info('scheduleFlush: setting 50ms timer');
       flushTimer = setTimeout(() => { flushTimer = null; flushContent(); }, FLUSH_INTERVAL);
     }
 
@@ -268,6 +249,7 @@ export function useAgent(sessionId?: string) {
           } else {
             if (thinkingActive.value) {
               thinkingActive.value = false;
+              webAgentLog.info('onChunk: thinking -> content transition');
             }
             // Ensure we have a response block before buffering
             if (!currentBlock || currentBlock.type !== 'response') {
@@ -282,8 +264,11 @@ export function useAgent(sessionId?: string) {
         },
         (event: StreamEvent) => {
           if (event.type === 'tool_start') {
-            toolStatus.value = event.message || '';
-            const match = (event.message || '').match(/^🔍\s*(\S+):?\s*(.*)/);
+            // 跳过 MCP 初始化事件（🔌 开头的非真实工具调用）
+            const toolMsg = event.message || '';
+            if (toolMsg.startsWith('🔌')) return;
+            toolStatus.value = toolMsg;
+            const match = toolMsg.match(/^🔍\s*(\S+):?\s*(.*)/);
             const toolType = match ? match[1] : (event.message || 'tool');
             const toolLabel = match ? match[2] : '';
             finishBlock();
@@ -294,7 +279,8 @@ export function useAgent(sessionId?: string) {
               toolType,
               toolLabel,
               completed: false,
-            };
+              timestamp: Date.now(),
+            } as MessageBlock;
             const msg = messages.value.find(m => m.id === assistantMsgId);
             if (msg) {
               if (!msg.blocks) msg.blocks = [];
@@ -343,12 +329,16 @@ export function useAgent(sessionId?: string) {
         }
       }
     } finally {
-      if (flushTimer) clearTimeout(flushTimer);
+      webAgentLog.info(`finally: flushTimer=${!!flushTimer}, currentBlock=${(currentBlock as any)?.type || 'null'}, bufferLen=${contentBuffer.length}, blocksCount=${messages.value.find(m => m.id === assistantMsgId)?.blocks?.length || 0}`);
+      if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
       flushContent();
       activeAbortController = null;
       finishBlock();
       const msg = messages.value.find(m => m.id === assistantMsgId);
-      if (msg) msg.timestamp = Date.now();
+      if (msg) {
+        msg.timestamp = Date.now();
+        webAgentLog.info(`finally done: blocks.length=${msg.blocks?.length || 0}, blocks=${msg.blocks?.map(b => `${b.type}(len=${(b as any).content?.length || 0}, completed=${b.completed})`).join(', ')}`);
+      }
       thinkingActive.value = false;
       isProcessing.value = false;
     }

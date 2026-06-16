@@ -73,10 +73,12 @@ export function createAgentRouter(configDir: string, workspaceManager: Workspace
 
       const runtime = getRuntime(req.body);
 
-      // Refresh MCP config for cached workspace runtimes
-      if (req.body.workspaceId) {
+      // MCP: only connect if not yet initialized (keep persistent connection)
+      if (req.body.workspaceId && runtime.mcpStatus.serverCount === 0) {
         const latestMcpServers = loadEnabledMcpServers(configDir);
-        await runtime.reinitialize(latestMcpServers.length > 0 ? latestMcpServers : undefined);
+        if (latestMcpServers.length > 0) {
+          await runtime.reinitialize(latestMcpServers);
+        }
       }
 
       const result = await runtime.chat(message, context as AgentContext, sessionId || 'default');
@@ -118,22 +120,25 @@ export function createAgentRouter(configDir: string, workspaceManager: Workspace
     const runtime = getRuntime(req.body, workspaceRoot);
     const startMs = Date.now();
 
-    // Refresh MCP config from disk for cached workspace runtimes.
-    // The runtime may have been created before the user added/enabled MCP servers.
-    if (body.workspaceId) {
+    // MCP: keep persistent connection per workspace, only connect if not yet initialized
+    if (body.workspaceId && runtime.mcpStatus.serverCount === 0) {
       const latestMcpServers = loadEnabledMcpServers(configDir);
-      await runtime.reinitialize(latestMcpServers.length > 0 ? latestMcpServers : undefined);
+      if (latestMcpServers.length > 0) {
+        await runtime.reinitialize(latestMcpServers);
+      }
     }
 
     // SSE keep-alive heartbeat to prevent proxy timeouts during long tool executions
     const keepAlive = setInterval(() => { res.write(': heartbeat\n\n'); }, 15000);
 
     try {
+      // MCP 在 workspace 打开时已经长连接，这里只需确保初始化过
+      if (runtime.mcpStatus.serverCount === 0) {
+        await runtime.initialize();
+      }
       const mcpStatus = runtime.mcpStatus;
       if (mcpStatus.serverCount > 0) {
-        await runtime.initialize();
-        reqLog.info(`MCP initialized: ${mcpStatus.serverCount} server(s), ${mcpStatus.toolCount} tool(s)`);
-        writeSSE({ tool_start: `🔌 MCP: ${mcpStatus.serverCount} server(s), ${mcpStatus.toolCount} tool(s)` });
+        reqLog.info(`MCP active: ${mcpStatus.serverCount} server(s), ${mcpStatus.toolCount} tool(s)`);
       }
 
       reqLog.info('Stream started');
