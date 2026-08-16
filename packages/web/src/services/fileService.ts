@@ -10,6 +10,21 @@ export interface FileEntry {
   children?: FileEntry[];
 }
 
+export interface DirectoryEntry {
+  name: string;
+  path: string;
+  isDirectory: true;
+  hidden?: boolean;
+}
+
+export interface DirectoryBrowseResult {
+  path: string;
+  parent: string | null;
+  breadcrumbs: DirectoryEntry[];
+  entries: DirectoryEntry[];
+  truncated: boolean;
+}
+
 /**
  * 文件服务客户端接口
  *
@@ -43,6 +58,8 @@ export interface FileServiceClient {
   /** 拉取单个 session 的展示用消息(后端 memory.projectToDisplay 产出) */
   getSessionMessages(workspaceId: string, sessionId: string, workspaceRoot?: string): Promise<DisplayMessage[]>;
   setWorkspaceRoot?(root: string): void;
+  listDirectories?(path?: string): Promise<DirectoryBrowseResult>;
+  createDirectory?(parent: string, name: string): Promise<DirectoryEntry>;
 }
 
 export interface StoredTabInfo {
@@ -118,6 +135,8 @@ export function createElectronClient(): FileServiceClient {
     stat: (path) => api.stat(path) as Promise<FileEntry>,
     rename: (oldPath, newPath) => api.rename(oldPath, newPath),
     openFolderPath: (path) => api.openFolderPath(path),
+    listDirectories: (path) => api.listDirectories(path),
+    createDirectory: (parent, name) => api.createDirectory(parent, name),
     openFolder: () => api.openFolder(),
     openFile: () => api.openFile(),
     saveFileAs: (path, content) => api.saveFile(path, content),
@@ -266,6 +285,54 @@ export function createServerClient(baseUrl = ''): FileServiceClient {
     },
     setWorkspaceRoot: (root: string) => {
       workspaceRoot = root;
+    },
+    listDirectories: async (path) => {
+      if (!path) {
+        const roots = await request<FileEntry[]>('/api/workspace/roots');
+        return {
+          path: '',
+          parent: null,
+          breadcrumbs: [] as DirectoryEntry[],
+          entries: roots
+            .filter((entry) => entry.isDirectory)
+            .map((entry) => ({
+              name: entry.name,
+              path: entry.path,
+              isDirectory: true,
+              hidden: entry.name.startsWith('.'),
+            })) as DirectoryEntry[],
+          truncated: false,
+        };
+      }
+      const data = await request<{ path: string; parent: string; entries: FileEntry[] }>(
+        `/api/workspace/browse?path=${encodeURIComponent(path)}`
+      );
+      return {
+        path: data.path,
+        parent: data.parent,
+        breadcrumbs: [] as DirectoryEntry[],
+        entries: data.entries
+          .filter((entry) => entry.isDirectory)
+          .map((entry) => ({
+            name: entry.name,
+            path: entry.path,
+            isDirectory: true,
+            hidden: entry.name.startsWith('.'),
+          })) as DirectoryEntry[],
+        truncated: false,
+      };
+    },
+    createDirectory: async (parent, name) => {
+      await request('/api/files/mkdir', {
+        method: 'POST',
+        body: JSON.stringify({ path: name, root: parent }),
+      });
+      return {
+        name,
+        path: `${parent.replace(/[\/]?$/, '')}/${name}`,
+        isDirectory: true,
+        hidden: name.startsWith('.'),
+      };
     },
   };
 }
@@ -562,11 +629,13 @@ export function createFileServiceClient(): FileServiceClient {
       stat: ipc.stat,
       rename: ipc.rename,
       openFolderPath: ipc.openFolderPath,
+      listDirectories: ipc.listDirectories,
+      createDirectory: ipc.createDirectory,
       openFolder: ipc.openFolder,
       openFile: ipc.openFile,
       saveFileAs: ipc.saveFileAs,
-      browseFilesystem: ipc.browseFilesystem,
-      getWorkspaceRoots: ipc.getWorkspaceRoots,
+      browseFilesystem: http.browseFilesystem,
+      getWorkspaceRoots: http.getWorkspaceRoots,
       setWorkspaceRoot: ipc.setWorkspaceRoot,
       // workspace/session 操作 → HTTP server
       openWorkspace: http.openWorkspace,
